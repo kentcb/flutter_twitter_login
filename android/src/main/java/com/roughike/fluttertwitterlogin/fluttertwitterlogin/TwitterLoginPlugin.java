@@ -30,7 +30,6 @@ public class TwitterLoginPlugin extends Callback<TwitterSession> implements Meth
 
     private final Registrar registrar;
 
-    private TwitterAuthClient authClientInstance;
     private Result pendingResult;
 
     public static void registerWith(Registrar registrar) {
@@ -42,10 +41,16 @@ public class TwitterLoginPlugin extends Callback<TwitterSession> implements Meth
     private TwitterLoginPlugin(Registrar registrar) {
         this.registrar = registrar;
         registrar.addActivityResultListener(this);
+
+        checkTwitterCoreAndEnable();
+
+        Twitter.getLogger().i(TwitterCore.TAG, "Initialized.");
     }
 
     @Override
     public void onMethodCall(MethodCall call, Result result) {
+        Twitter.getLogger().i(TwitterCore.TAG, "Received method call: " + call.method);
+
         switch (call.method) {
             case METHOD_GET_CURRENT_SESSION:
                 getCurrentSession(result, call);
@@ -76,7 +81,6 @@ public class TwitterLoginPlugin extends Callback<TwitterSession> implements Meth
     }
 
     private void getCurrentSession(Result result, MethodCall call) {
-        initializeAuthClient(call);
         TwitterSession session = TwitterCore.getInstance().getSessionManager().getActiveSession();
         HashMap<String, Object> sessionMap = sessionToMap(session);
 
@@ -85,28 +89,22 @@ public class TwitterLoginPlugin extends Callback<TwitterSession> implements Meth
 
     private void authorize(Result result, MethodCall call) {
         setPendingResult("authorize", result);
-        initializeAuthClient(call).authorize(registrar.activity(), this);
+        String consumerKey = call.argument("consumerKey");
+        String consumerSecret = call.argument("consumerSecret");
+        getTwitterAuthClient().authorize(registrar.activity(), this);
     }
 
-    private TwitterAuthClient initializeAuthClient(MethodCall call) {
-        if (authClientInstance == null) {
-            String consumerKey = call.argument("consumerKey");
-            String consumerSecret = call.argument("consumerSecret");
-
-            authClientInstance = configureClient(consumerKey, consumerSecret);
+    volatile TwitterAuthClient authClient;
+    TwitterAuthClient getTwitterAuthClient() {
+        if (authClient == null) {
+            synchronized (TwitterLoginPlugin.class) {
+                if (authClient == null) {
+                    Twitter.getLogger().i(TwitterCore.TAG, "Creating auth client.");
+                    authClient = new TwitterAuthClient();
+                }
+            }
         }
-
-        return authClientInstance;
-    }
-
-    private TwitterAuthClient configureClient(String consumerKey, String consumerSecret) {
-        TwitterAuthConfig authConfig = new TwitterAuthConfig(consumerKey, consumerSecret);
-        TwitterConfig config = new TwitterConfig.Builder(registrar.context())
-                .twitterAuthConfig(authConfig)
-                .build();
-        Twitter.initialize(config);
-
-        return new TwitterAuthClient();
+        return authClient;
     }
 
     private void logOut(Result result, MethodCall call) {
@@ -114,7 +112,6 @@ public class TwitterLoginPlugin extends Callback<TwitterSession> implements Meth
         CookieManager cookieManager = CookieManager.getInstance();
         cookieManager.removeSessionCookie();
 
-        initializeAuthClient(call);
         TwitterCore.getInstance().getSessionManager().clearActiveSession();
         result.success(null);
     }
@@ -134,6 +131,8 @@ public class TwitterLoginPlugin extends Callback<TwitterSession> implements Meth
 
     @Override
     public void success(final com.twitter.sdk.android.core.Result<TwitterSession> result) {
+        Twitter.getLogger().i(TwitterCore.TAG, "Success!");
+
         if (pendingResult != null) {
             final HashMap<String, Object> sessionMap = sessionToMap(result.data);
             final HashMap<String, Object> resultMap = new HashMap<String, Object>() {{
@@ -148,6 +147,8 @@ public class TwitterLoginPlugin extends Callback<TwitterSession> implements Meth
 
     @Override
     public void failure(final TwitterException exception) {
+        Twitter.getLogger().i(TwitterCore.TAG, "Failure!");
+
         if (pendingResult != null) {
             final HashMap<String, Object> resultMap = new HashMap<String, Object>() {{
                 put("status", "error");
@@ -161,10 +162,31 @@ public class TwitterLoginPlugin extends Callback<TwitterSession> implements Meth
 
     @Override
     public boolean onActivityResult(int requestCode, int resultCode, Intent data) {
-        if (authClientInstance != null) {
-            authClientInstance.onActivityResult(requestCode, resultCode, data);
+        Twitter.getLogger().i(TwitterCore.TAG, "onActivityResult");
+
+        if (requestCode == getTwitterAuthClient().getRequestCode()) {
+            Twitter.getLogger().i(TwitterCore.TAG, "Forwarding result.");
+
+            getTwitterAuthClient().onActivityResult(requestCode, resultCode, data);
         }
 
         return false;
+    }
+
+    private void checkTwitterCoreAndEnable() {
+        TwitterAuthConfig authConfig = new TwitterAuthConfig("xxx", "xxx");
+        TwitterConfig config = new TwitterConfig.Builder(registrar.context())
+                .twitterAuthConfig(authConfig)
+                .build();
+        Twitter.initialize(config);
+
+        try {
+            TwitterCore.getInstance();
+            Twitter.getLogger().i(TwitterCore.TAG, "Twitter core enabled.");
+
+        } catch (IllegalStateException ex) {
+            //Disable if TwitterCore hasn't started
+            Twitter.getLogger().e(TwitterCore.TAG, ex.getMessage());
+        }
     }
 }
